@@ -18,15 +18,15 @@ set(BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # determine version
 ########################################################################
 foreach(which MAJOR MINOR PATCH)
-    file(STRINGS "${SOURCE_DIR}/include/mlm_library.h" MLM_VERSION_STRING REGEX "#define MLM_VERSION_${which}")
-    string(REGEX MATCH "#define MLM_VERSION_${which} ([0-9_]+)" MLM_REGEX_MATCH "${MLM_VERSION_STRING}")
-    if (NOT MLM_REGEX_MATCH)
-        message(FATAL_ERROR "failed to parse MLM_VERSION_${which} from malamute.h")
+    file(STRINGS "${SOURCE_DIR}/include/mlm_library.h" MALAMUTE_VERSION_STRING REGEX "#define MALAMUTE_VERSION_${which}")
+    string(REGEX MATCH "#define MALAMUTE_VERSION_${which} ([0-9_]+)" MALAMUTE_REGEX_MATCH "${MALAMUTE_VERSION_STRING}")
+    if (NOT MALAMUTE_REGEX_MATCH)
+        message(FATAL_ERROR "failed to parse MALAMUTE_VERSION_${which} from malamute.h")
     endif()
-    set(MLM_${which}_VERSION ${CMAKE_MATCH_1})
+    set(MALAMUTE_${which}_VERSION ${CMAKE_MATCH_1})
 endforeach(which)
 
-set(MLM_VERSION ${MLM_MAJOR_VERSION}.${MLM_MINOR_VERSION}.${MLM_PATCH_VERSION})
+set(MALAMUTE_VERSION ${MALAMUTE_MAJOR_VERSION}.${MALAMUTE_MINOR_VERSION}.${MALAMUTE_PATCH_VERSION})
 
 ########################################################################
 # platform.h
@@ -176,9 +176,9 @@ if(MSVC)
     add_library(mlm SHARED ${mlm_sources})
     set_target_properties(mlm PROPERTIES
                           PUBLIC_HEADER "${mlm_headers}"
-                          RELEASE_POSTFIX "-mt-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          RELWITHDEBINFO_POSTFIX "-mt-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          DEBUG_POSTFIX "-mt-gd-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
+                          RELEASE_POSTFIX "-mt-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          RELWITHDEBINFO_POSTFIX "-mt-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          DEBUG_POSTFIX "-mt-gd-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
                           RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
                           ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
                           COMPILE_OPTIONS "/D LIBMLM_EXPORTS"
@@ -190,9 +190,9 @@ if(MSVC)
     add_library(mlm-static STATIC ${mlm_sources})
     set_target_properties(mlm-static PROPERTIES
                           PUBLIC_HEADER "${mlm_headers}"
-                          RELEASE_POSTFIX "-mt-${static_flag_release}${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          RELWITHDEBINFO_POSTFIX "-mt-${static_flag_release}${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          DEBUG_POSTFIX "-mt-${static_flag_debug}gd-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
+                          RELEASE_POSTFIX "-mt-${static_flag_release}${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          RELWITHDEBINFO_POSTFIX "-mt-${static_flag_release}${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          DEBUG_POSTFIX "-mt-${static_flag_debug}gd-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
                           ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
                           COMPILE_OPTIONS "${mlm_static_compile_flags}"
                           OUTPUT_NAME "libmlm")
@@ -203,9 +203,9 @@ else()
     add_library(mlm SHARED ${mlm_sources})
     set_target_properties(mlm PROPERTIES
                           PUBLIC_HEADER "${mlm_headers}"
-                          RELEASE_POSTFIX "-mt-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          RELWITHDEBINFO_POSTFIX "-mt-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          DEBUG_POSTFIX "-mt-gd-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
+                          RELEASE_POSTFIX "-mt-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          RELWITHDEBINFO_POSTFIX "-mt-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          DEBUG_POSTFIX "-mt-gd-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
                           LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
                           ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
                           COMPILE_OPTIONS "/D LIBMLM_EXPORTS"
@@ -216,9 +216,9 @@ else()
     add_library(mlm-static STATIC ${mlm_sources})
     set_target_properties(mlm-static PROPERTIES
                           PUBLIC_HEADER "${mlm_headers}"
-                          RELEASE_POSTFIX "-mt-${static_flag_release}${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          RELWITHDEBINFO_POSTFIX "-mt-${static_flag_release}${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
-                          DEBUG_POSTFIX "-mt-${static_flag_debug}gd-${MLM_MAJOR_VERSION}_${MLM_MINOR_VERSION}_${MLM_PATCH_VERSION}"
+                          RELEASE_POSTFIX "-mt-${static_flag_release}${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          RELWITHDEBINFO_POSTFIX "-mt-${static_flag_release}${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
+                          DEBUG_POSTFIX "-mt-${static_flag_debug}gd-${MALAMUTE_MAJOR_VERSION}_${MALAMUTE_MINOR_VERSION}_${MALAMUTE_PATCH_VERSION}"
                           ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
                           COMPILE_OPTIONS "${mlm_static_compile_flags}"
                           OUTPUT_NAME "libmlm")
@@ -256,7 +256,7 @@ add_test(mlm_selftest mlm_selftest)
 ########################################################################
 # summary
 ########################################################################
-message(STATUS "version: ${MLM_VERSION}")
+message(STATUS "version: ${MALAMUTE_VERSION}")
 message(STATUS "install: ${CMAKE_INSTALL_PREFIX}")
 
 ################################################################################
