@@ -36,6 +36,7 @@ typedef struct {
 
     //  Own properties
     int heartbeat_timer;        //  Timeout for heartbeats to server
+    int retries;                //  How many heartbeats we've tried
 } client_t;
 
 //  Include the generated client engine
@@ -61,19 +62,24 @@ client_terminate (client_t *self)
 
 
 //  ---------------------------------------------------------------------------
+//  use_plain_security_mechanism
+//
+
+static void
+use_plain_security_mechanism (client_t *self)
+{
+    zsock_set_plain_username (self->dealer, self->args->username);
+    zsock_set_plain_password (self->dealer, self->args->password);
+}
+
+
+//  ---------------------------------------------------------------------------
 //  connect_to_server_endpoint
 //
 
 static void
 connect_to_server_endpoint (client_t *self)
 {
-    //  If address is username/password, use these plain authentication
-    if (strchr (self->args->address, '/')) {
-        char *password = strchr (self->args->address, '/');
-        *password++ = 0;
-        zsock_set_plain_username (self->dealer, self->args->address);
-        zsock_set_plain_password (self->dealer, password);
-    }
     if (zsock_connect (self->dealer, "%s", self->args->endpoint)) {
         engine_set_exception (self, bad_endpoint_event);
         zsys_warning ("could not connect to %s", self->args->endpoint);
@@ -104,15 +110,32 @@ use_connect_timeout (client_t *self)
 
 
 //  ---------------------------------------------------------------------------
-//  use_heartbeat_timer
+//  client_is_connected
 //
 
 static void
-use_heartbeat_timer (client_t *self)
+client_is_connected (client_t *self)
 {
+    self->retries = 0;
+    engine_set_connected (self, true);
     engine_set_timeout (self, self->heartbeat_timer);
 }
 
+
+//  ---------------------------------------------------------------------------
+//  check_if_connection_is_dead
+//
+
+static void
+check_if_connection_is_dead (client_t *self)
+{
+    //  We send at most 3 heartbeats before expiring the server
+    if (++self->retries >= 3) {
+        engine_set_timeout (self, 0);
+        engine_set_connected (self, false);
+        engine_set_exception (self, exception_event);
+    }
+}
 
 
 //  ---------------------------------------------------------------------------
@@ -160,7 +183,7 @@ pass_stream_message_to_app (client_t *self)
 {
     zstr_sendm (self->msgpipe, "STREAM DELIVER");
     zsock_bsend (self->msgpipe, "sssp",
-                 mlm_proto_stream (self->message),
+                 mlm_proto_address (self->message),
                  mlm_proto_sender (self->message),
                  mlm_proto_subject (self->message),
                  mlm_proto_get_content (self->message));
@@ -272,17 +295,14 @@ signal_server_not_present (client_t *self)
 
 //  ---------------------------------------------------------------------------
 //  Selftest
-
 void
 mlm_client_test (bool verbose)
 {
-    printf (" * mlm_client: ");
-    if (verbose)
-        printf ("\n");
+    printf (" * mlm_client: \n");
 
     //  @selftest
     mlm_client_verbose = verbose;
-    
+
     //  Start a server to test against, and bind to endpoint
     zactor_t *server = zactor_new (mlm_server, "mlm_client_test");
     if (verbose)
@@ -299,12 +319,102 @@ mlm_client_test (bool verbose)
     zstr_sendx (auth, "PLAIN", "src/passwords.cfg", NULL);
     zsock_wait (auth);
 
-    //  Test stream pattern
-    mlm_client_t *writer = mlm_client_new ("ipc://@/malamute", 1000, "writer/secret");
-    assert (writer);
+    /////
+    // Test mutual address exchange
+    /**
+       -----------                                                                                             ----------
 
-    mlm_client_t *reader = mlm_client_new ("ipc://@/malamute", 1000, "reader/secret");
+       | Frontend | -> 1) provide addr, req opp addr   ->  |\         / |  <-  1) Provide addr, Req opp addr  | Backend |
+                                                              >Broker<                                              
+       -----------     2) Receive opp addr             <-                  -> 2) Receive opposite address      ----------
+       
+       3) Direct connection establishment
+       -----------              ----------- 
+                                            
+       | Frontend | <- Send -> | Backend |
+                                            
+       -----------              ----------- 
+
+     */
+    mlm_client_t *frontend = mlm_client_new ();
+    assert(frontend);
+    mlm_client_t *backend = mlm_client_new();
+    assert(backend);
+
+    // connect front side to broker
+    printf("connecting frontend to broker\n");
+    int rc = mlm_client_set_plain_auth (frontend, "writer", "secret");
+    assert (rc == 0);
+    rc=mlm_client_connect (frontend, "tcp://127.0.0.1:9999", 1000, "");
+    assert (rc == 0);
+
+    // connect back side to broker    
+    printf("connecting backend to broker\n");
+    rc = mlm_client_set_plain_auth (backend, "reader", "secret");
+    assert (rc == 0);
+    rc=mlm_client_connect (backend, "tcp://127.0.0.1:9999", 1000, "");
+    assert (rc == 0);
+    
+    //before you ever set a service, you should've already called bind in order to facilitate a 
+    // connection from the other side. In this way, it's causally correct.
+    // the frontend tells the broker that it is interested in addresses that are on the other side
+    printf("setting frontend service\n");
+    mlm_client_set_worker(frontend, "backendEndpoints", "SET*");
+    // the backend tells the broker that it is interested in addresses that are on the other side
+    printf("setting backend service\n");
+    mlm_client_set_worker(backend, "frontendEndpoints", "SET*");
+    
+    // the frontend tells the broker what it's address is, fulfilling a need that the backend set;
+    //  consequently, the broker sends this to the backend, which has set a service that it is
+    //  subscribed to. SET* matches SET
+    printf("sending frontend address SET message\n");
+    mlm_client_sendforx(frontend, "frontendEndpoints", "SET", "inproc://frontend", NULL);
+    // the backend tells the broker what it's address is, fullfilling a need that the frontend set;
+    //  consequently, the broker sends this to the frontend, which has reported a service to the broker
+    //  the broker matches SET to SET*.
+    printf("sending backend address SET message\n");
+    mlm_client_sendforx(backend, "backendEndpoints", "SET", "inproc://backend", NULL);
+    
+    char *set=NULL, *opp_addr=NULL;
+    printf("receiving on backend");
+    mlm_client_recvx(backend, &set, &opp_addr, NULL);
+    assert(set); 
+    assert(opp_addr); 
+    // connect backend to frontend here, then clean up
+    zstr_free(&opp_addr);
+    zstr_free(&set);
+
+    printf("receiving on backend");
+    mlm_client_recvx(frontend, &set, &opp_addr, NULL);
+    assert(set);
+    assert(opp_addr);
+    // connect frontend to backend here, then clean up
+    zstr_free(&opp_addr);
+    zstr_free(&set);
+
+    // cleanup
+    mlm_client_destroy(&backend);
+    mlm_client_destroy(&frontend);
+    
+    // End of mutual address exchange tests
+    /////
+    
+    //  Test stream pattern
+    mlm_client_t *writer = mlm_client_new ();
+    assert (writer);
+    rc = mlm_client_set_plain_auth (writer, "writer", "secret");
+    assert (rc == 0);
+    assert (mlm_client_connected (writer) == false);
+    rc = mlm_client_connect (writer, "tcp://127.0.0.1:9999", 1000, "writer");
+    assert (rc == 0);
+    assert (mlm_client_connected (writer) == true);
+
+    mlm_client_t *reader = mlm_client_new ();
     assert (reader);
+    rc = mlm_client_set_plain_auth (reader, "reader", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (reader, "tcp://127.0.0.1:9999", 1000, "");
+    assert (rc == 0);
 
     mlm_client_set_producer (writer, "weather");
     mlm_client_set_consumer (reader, "weather", "temp.*");
@@ -342,8 +452,17 @@ mlm_client_test (bool verbose)
     zstr_free (&subject);
     zstr_free (&content);
 
+    mlm_client_destroy (&reader);
+
     //  Test mailbox pattern
-    mlm_client_sendtox (writer, "reader", "subject 1", "Message 1", "attachment", NULL);
+    reader = mlm_client_new ();
+    assert (reader);
+    rc = mlm_client_set_plain_auth (reader, "reader", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (reader, "tcp://127.0.0.1:9999", 1000, "mailbox");
+    assert (rc == 0);
+
+    mlm_client_sendtox (writer, "mailbox", "subject 1", "Message 1", "attachment", NULL);
 
     char *attach;
     mlm_client_recvx (reader, &subject, &content, &attach, NULL);
@@ -359,11 +478,15 @@ mlm_client_test (bool verbose)
 
     //  Now test that mailbox survives reader disconnect
     mlm_client_destroy (&reader);
-    mlm_client_sendtox (writer, "reader", "subject 2", "Message 2", NULL);
-    mlm_client_sendtox (writer, "reader", "subject 3", "Message 3", NULL);
+    mlm_client_sendtox (writer, "mailbox", "subject 2", "Message 2", NULL);
+    mlm_client_sendtox (writer, "mailbox", "subject 3", "Message 3", NULL);
 
-    reader = mlm_client_new ("ipc://@/malamute", 500, "reader/secret");
+    reader = mlm_client_new ();
     assert (reader);
+    rc = mlm_client_set_plain_auth (reader, "reader", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (reader, "tcp://127.0.0.1:9999", 500, "mailbox");
+    assert (rc == 0);
 
     mlm_client_recvx (reader, &subject, &content, &attach, NULL);
     assert (streq (subject, "subject 2"));
@@ -414,38 +537,79 @@ mlm_client_test (bool verbose)
     zstr_free (&content);
     mlm_client_destroy (&reader);
 
-    //  Test multiple readers for same message
-    writer = mlm_client_new ("ipc://@/malamute", 1000, "writer/secret");
-    assert (writer);
+    //  Test multiple readers and multiple writers
+    mlm_client_t *writer1 = mlm_client_new ();
+    assert (writer1);
+    rc = mlm_client_set_plain_auth (writer1, "writer", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (writer1, "tcp://127.0.0.1:9999", 1000, "");
+    assert (rc == 0);
 
-    mlm_client_t *reader1 = mlm_client_new ("ipc://@/malamute", 1000, "reader1/secret");
+    mlm_client_t *writer2 = mlm_client_new ();
+    assert (writer2);
+    rc = mlm_client_set_plain_auth (writer2, "writer", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (writer2, "tcp://127.0.0.1:9999", 1000, "");
+    assert (rc == 0);
+
+    mlm_client_t *reader1 = mlm_client_new ();
     assert (reader1);
+    rc = mlm_client_set_plain_auth (reader1, "reader", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (reader1, "tcp://127.0.0.1:9999", 1000, "");
+    assert (rc == 0);
 
-    mlm_client_t *reader2 = mlm_client_new ("ipc://@/malamute", 1000, "reader2/secret");
+    mlm_client_t *reader2 = mlm_client_new ();
     assert (reader2);
+    rc = mlm_client_set_plain_auth (reader2, "reader", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (reader2, "tcp://127.0.0.1:9999", 1000, "");
+    assert (rc == 0);
 
-    mlm_client_set_producer (writer, "weather");
-    mlm_client_set_consumer (reader1, "weather", "temp.*");
-    mlm_client_set_consumer (reader2, "weather", "temp.*");
+    mlm_client_set_producer (writer1, "weather");
+    mlm_client_set_producer (writer2, "traffic");
+    mlm_client_set_consumer (reader1, "weather", "newyork");
+    mlm_client_set_consumer (reader1, "traffic", "newyork");
+    mlm_client_set_consumer (reader2, "weather", "newyork");
+    mlm_client_set_consumer (reader2, "traffic", "newyork");
 
-    mlm_client_sendx (writer, "temp.newyork", "8", NULL);
+    mlm_client_sendx (writer1, "newyork", "8", NULL);
 
     mlm_client_recvx (reader1, &subject, &content, NULL);
-    assert (streq (subject, "temp.newyork"));
+    assert (streq (mlm_client_address (reader1), "weather"));
+    assert (streq (subject, "newyork"));
     assert (streq (content, "8"));
     zstr_free (&subject);
     zstr_free (&content);
 
     mlm_client_recvx (reader2, &subject, &content, NULL);
-    assert (streq (subject, "temp.newyork"));
+    assert (streq (mlm_client_address (reader2), "weather"));
+    assert (streq (subject, "newyork"));
     assert (streq (content, "8"));
     zstr_free (&subject);
     zstr_free (&content);
 
-    mlm_client_destroy (&writer);
+    mlm_client_sendx (writer2, "newyork", "85", NULL);
+
+    mlm_client_recvx (reader1, &subject, &content, NULL);
+    assert (streq (mlm_client_address (reader1), "traffic"));
+    assert (streq (subject, "newyork"));
+    assert (streq (content, "85"));
+    zstr_free (&subject);
+    zstr_free (&content);
+
+    mlm_client_recvx (reader2, &subject, &content, NULL);
+    assert (streq (mlm_client_address (reader2), "traffic"));
+    assert (streq (subject, "newyork"));
+    assert (streq (content, "85"));
+    zstr_free (&subject);
+    zstr_free (&content);
+
+    mlm_client_destroy (&writer1);
+    mlm_client_destroy (&writer2);
     mlm_client_destroy (&reader1);
     mlm_client_destroy (&reader2);
-    
+
     //  Done, shut down
     zactor_destroy (&auth);
     zactor_destroy (&server);

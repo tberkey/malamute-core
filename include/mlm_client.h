@@ -19,8 +19,10 @@
     =========================================================================
 */
 
-#ifndef __MLM_CLIENT_H_INCLUDED__
-#define __MLM_CLIENT_H_INCLUDED__
+#ifndef MLM_CLIENT_H_INCLUDED
+#define MLM_CLIENT_H_INCLUDED
+
+#include <czmq.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,15 +35,12 @@ typedef struct _mlm_client_t mlm_client_t;
 #endif
 
 //  @interface
-//  Create a new mlm_client
-//  Connect to server endpoint, with specified timeout in msecs (zero means wait    
-//  forever). Constructor succeeds if connection is successful. The caller may      
-//  specify its address. If is in form user/password, client logins to the broker
-//  via PLAIN authentication.
+//  Create a new mlm_client, return the reference if successful, or NULL
+//  if construction failed due to lack of available memory.
 MLM_EXPORT mlm_client_t *
-    mlm_client_new (const char *endpoint, uint32_t timeout, const char *address);
+    mlm_client_new (void);
 
-//  Destroy the mlm_client
+//  Destroy the mlm_client and free all memory used by the object.
 MLM_EXPORT void
     mlm_client_destroy (mlm_client_t **self_p);
 
@@ -58,13 +57,32 @@ MLM_EXPORT zactor_t *
 MLM_EXPORT zsock_t *
     mlm_client_msgpipe (mlm_client_t *self);
 
+//  Return true if client is currently connected, else false. Note that the
+//  client will automatically re-connect if the server dies and restarts after
+//  a successful first connection.
+MLM_EXPORT bool
+    mlm_client_connected (mlm_client_t *self);
+
+//  Set PLAIN authentication username and password. If you do not call this, the    
+//  client will use NULL authentication. TODO: add "set curve auth".                
+//  Returns >= 0 if successful, -1 if interrupted.
+MLM_EXPORT int 
+    mlm_client_set_plain_auth (mlm_client_t *self, const char *username, const char *password);
+
+//  Connect to server endpoint, with specified timeout in msecs (zero means wait    
+//  forever). Constructor succeeds if connection is successful. The caller may      
+//  specify its address.                                                            
+//  Returns >= 0 if successful, -1 if interrupted.
+MLM_EXPORT int 
+    mlm_client_connect (mlm_client_t *self, const char *endpoint, uint32_t timeout, const char *address);
+
 //  Prepare to publish to a specified stream. After this, all messages are sent to  
 //  this stream exclusively.                                                        
 //  Returns >= 0 if successful, -1 if interrupted.
 MLM_EXPORT int 
     mlm_client_set_producer (mlm_client_t *self, const char *stream);
 
-//  Consume messages with matching addresses. The pattern is a regular expression   
+//  Consume messages with matching subjects. The pattern is a regular expression    
 //  using the CZMQ zrex syntax. The most useful elements are: ^ and $ to match the  
 //  start and end, . to match any character, \s and \S to match whitespace and      
 //  non-whitespace, \d and \D to match a digit and non-digit, \a and \A to match    
@@ -168,7 +186,7 @@ MLM_EXPORT int
 //  Self test of this class
 MLM_EXPORT void
     mlm_client_test (bool verbose);
-    
+
 //  To enable verbose tracing (animation) of mlm_client instances, set
 //  this to true. This lets you trace from and including construction.
 MLM_EXPORT extern volatile int

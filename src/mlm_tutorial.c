@@ -55,17 +55,23 @@ int main (int argc, char *argv [])
     //  The broker is now running. Let's start two clients, one to publish
     //  messages and one to receive them. We're going to test the stream
     //  pattern with some natty wildcard patterns.
-
-    //  We use a timeout of 200 msec, and login with username/password,
-    //  where the username maps to a mailbox name
-    mlm_client_t *reader = mlm_client_new ("ipc://@/malamute", 1000, "reader/secret");
+    mlm_client_t *reader = mlm_client_new ();
     assert (reader);
-    mlm_client_t *writer = mlm_client_new ("ipc://@/malamute", 1000, "writer/secret");
+    int rc = mlm_client_set_plain_auth (reader, "reader", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (reader, "tcp://127.0.0.1:9999", 1000, "reader");
+    assert (rc == 0);
+
+    mlm_client_t *writer = mlm_client_new ();
     assert (writer);
+    rc = mlm_client_set_plain_auth (writer, "writer", "secret");
+    assert (rc == 0);
+    rc = mlm_client_connect (writer, "tcp://127.0.0.1:9999", 1000, "writer");
+    assert (rc == 0);
 
     //  The writer publishes to the "weather" stream
     mlm_client_set_producer (writer, "weather");
-    
+
     //  The reader consumes temperature messages off the "weather" stream
     mlm_client_set_consumer (reader, "weather", "temp.*");
 
@@ -93,14 +99,14 @@ int main (int argc, char *argv [])
     assert (streq (mlm_client_command (reader), "STREAM DELIVER"));
     assert (streq (mlm_client_sender (reader), "writer"));
     assert (streq (mlm_client_address (reader), "weather"));
-    
+
     //  Let's get the other two messages:
     mlm_client_recvx (reader, &subject, &content, NULL);
     assert (streq (subject, "temp.madrid"));
     assert (streq (content, "3"));
     zstr_free (&subject);
     zstr_free (&content);
-    
+
     mlm_client_recvx (reader, &subject, &content, NULL);
     assert (streq (subject, "temp.london"));
     assert (streq (content, "5"));
@@ -111,7 +117,7 @@ int main (int argc, char *argv [])
     //  which does a proper deconnect handshake internally:
     mlm_client_destroy (&reader);
     mlm_client_destroy (&writer);
-    
+
     //  Finally, shut down the broker by destroying the actor; this does
     //  a proper shutdown so that all memory is freed as you'd expect.
     zactor_destroy (&broker);

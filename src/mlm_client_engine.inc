@@ -36,21 +36,23 @@ typedef enum {
 
 typedef enum {
     NULL_event = 0,
-    constructor_event = 1,
-    bad_endpoint_event = 2,
-    ok_event = 3,
-    expired_event = 4,
-    set_producer_event = 5,
-    set_consumer_event = 6,
-    set_worker_event = 7,
-    destructor_event = 8,
-    stream_deliver_event = 9,
-    mailbox_deliver_event = 10,
-    service_deliver_event = 11,
-    error_event = 12,
-    connection_pong_event = 13,
-    command_invalid_event = 14,
-    other_event = 15
+    set_plain_auth_event = 1,
+    connect_event = 2,
+    bad_endpoint_event = 3,
+    destructor_event = 4,
+    ok_event = 5,
+    expired_event = 6,
+    set_producer_event = 7,
+    set_consumer_event = 8,
+    set_worker_event = 9,
+    stream_deliver_event = 10,
+    mailbox_deliver_event = 11,
+    service_deliver_event = 12,
+    error_event = 13,
+    connection_pong_event = 14,
+    exception_event = 15,
+    command_invalid_event = 16,
+    other_event = 17
 } event_t;
 
 //  Names for state machine logging and error reporting
@@ -70,23 +72,25 @@ s_state_name [] = {
 static char *
 s_event_name [] = {
     "(NONE)",
-    "constructor",
+    "set_plain_auth",
+    "connect",
     "bad_endpoint",
+    "destructor",
     "OK",
     "expired",
     "set_producer",
     "set_consumer",
     "set_worker",
-    "destructor",
     "STREAM_DELIVER",
     "MAILBOX_DELIVER",
     "SERVICE_DELIVER",
     "ERROR",
     "CONNECTION_PONG",
+    "exception",
     "command_invalid",
     "other"
 };
- 
+
 
 //  ---------------------------------------------------------------------------
 //  Context for the client. This embeds the application-level client context
@@ -95,6 +99,8 @@ s_event_name [] = {
 
 //  These are the different method arguments we manage automatically
 struct _client_args_t {
+    char *username;
+    char *password;
     char *endpoint;
     uint32_t timeout;
     char *address;
@@ -110,6 +116,7 @@ typedef struct {
     zloop_t *loop;              //  Listen to pipe and dealer
     mlm_proto_t *message;       //  Message received or sent
     client_args_t args;         //  Method arguments structure
+    bool connected;             //  True if client is connected
     bool terminated;            //  True if client is shutdown
     bool fsm_stopped;           //  "terminate" action called
     size_t timeout;             //  inactivity timeout, msecs
@@ -137,6 +144,10 @@ static int
 static void
     s_satisfy_pedantic_compilers (void);
 static void
+    use_plain_security_mechanism (client_t *self);
+static void
+    signal_success (client_t *self);
+static void
     connect_to_server_endpoint (client_t *self);
 static void
     set_client_address (client_t *self);
@@ -145,9 +156,7 @@ static void
 static void
     signal_bad_endpoint (client_t *self);
 static void
-    signal_success (client_t *self);
-static void
-    use_heartbeat_timer (client_t *self);
+    client_is_connected (client_t *self);
 static void
     signal_server_not_present (client_t *self);
 static void
@@ -163,6 +172,8 @@ static void
 static void
     pass_service_message_to_app (client_t *self);
 static void
+    check_if_connection_is_dead (client_t *self);
+static void
     signal_failure (client_t *self);
 static void
     check_status_code (client_t *self);
@@ -172,7 +183,7 @@ static void
 //  Global tracing/animation indicator; we can't use a client method as
 //  that only works after construction (which we often want to trace).
 volatile int mlm_client_verbose = false;
-    
+
 //  Create a new client connection
 
 static s_client_t *
@@ -215,6 +226,8 @@ s_client_destroy (s_client_t **self_p)
     assert (self_p);
     if (*self_p) {
         s_client_t *self = *self_p;
+        zstr_free (&self->args.username);
+        zstr_free (&self->args.password);
         zstr_free (&self->args.endpoint);
         zstr_free (&self->args.address);
         zstr_free (&self->args.stream);
@@ -275,9 +288,11 @@ engine_set_wakeup_event (client_t *client, size_t delay, event_t event)
     }
 }
 
-//  Set timeout for next protocol read. By default, will wait forever
-//  or until the process is interrupted. The timeout is in milliseconds.
-//  The state machine must handle the "expired" event.
+//  Set heartbeat timeout. By default, the timeout is zero, meaning
+//  infinite. Setting a non-zero timeout causes the state machine to
+//  receive an "expired" event if is no incoming traffic for that many
+//  milliseconds. This cycles over and over until/unless the code sets
+//  a zero timeout. The state machine must handle the "expired" event.
 
 static void
 engine_set_timeout (client_t *client, size_t timeout)
@@ -285,6 +300,10 @@ engine_set_timeout (client_t *client, size_t timeout)
     if (client) {
         s_client_t *self = (s_client_t *) client;
         self->timeout = timeout;
+        if (self->expiry_timer) {
+            zloop_timer_end (self->loop, self->expiry_timer);
+            self->expiry_timer = 0;
+        }
         if (self->timeout)
             self->expiry_timer = zloop_timer (
                 self->loop, self->timeout, 1, s_client_handle_timeout, self);
@@ -306,6 +325,18 @@ engine_handle_socket (client_t *client, zsock_t *sock, zloop_reader_fn handler)
         }
         else
             zloop_reader_end (self->loop, sock);
+    }
+}
+
+//  Set connected to true/false. The client must call this if it wants
+//  to provide the API with the connected status.
+
+static void
+engine_set_connected (client_t *client, bool connected)
+{
+    if (client) {
+        s_client_t *self = (s_client_t *) client;
+        self->connected = connected;
     }
 }
 
@@ -382,7 +413,22 @@ s_client_execute (s_client_t *self, event_t event)
         }
         switch (self->state) {
             case start_state:
-                if (self->event == constructor_event) {
+                if (self->event == set_plain_auth_event) {
+                    if (!self->exception) {
+                        //  use plain security mechanism
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ use plain security mechanism");
+                        use_plain_security_mechanism (&self->client);
+                    }
+                    if (!self->exception) {
+                        //  signal success
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ signal success");
+                        signal_success (&self->client);
+                    }
+                }
+                else
+                if (self->event == connect_event) {
                     if (!self->exception) {
                         //  connect to server endpoint
                         if (mlm_client_verbose)
@@ -426,6 +472,15 @@ s_client_execute (s_client_t *self, event_t event)
                         self->fsm_stopped = true;
                     }
                 }
+                else
+                if (self->event == destructor_event) {
+                    if (!self->exception) {
+                        //  signal success
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ signal success");
+                        signal_success (&self->client);
+                    }
+                }
                 else {
                     //  Handle unexpected internal events
                     zsys_warning ("mlm_client: unhandled event %s in %s",
@@ -443,10 +498,10 @@ s_client_execute (s_client_t *self, event_t event)
                         signal_success (&self->client);
                     }
                     if (!self->exception) {
-                        //  use heartbeat timer
+                        //  client is connected
                         if (mlm_client_verbose)
-                            zsys_debug ("mlm_client:            $ use heartbeat timer");
-                        use_heartbeat_timer (&self->client);
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
                     }
                     if (!self->exception)
                         self->state = connected_state;
@@ -459,15 +514,17 @@ s_client_execute (s_client_t *self, event_t event)
                             zsys_debug ("mlm_client:            $ signal server not present");
                         signal_server_not_present (&self->client);
                     }
-                    if (!self->exception) {
-                        //  terminate
-                        if (mlm_client_verbose)
-                            zsys_debug ("mlm_client:            $ terminate");
-                        self->fsm_stopped = true;
-                    }
+                    if (!self->exception)
+                        self->state = start_state;
                 }
                 else
                 if (self->event == connection_pong_event) {
+                    if (!self->exception) {
+                        //  client is connected
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
+                    }
                 }
                 else
                 if (self->event == error_event) {
@@ -480,8 +537,17 @@ s_client_execute (s_client_t *self, event_t event)
                     if (!self->exception)
                         self->state = have_error_state;
                 }
+                else
+                if (self->event == exception_event) {
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ exception");
+                }
                 else {
                     //  Handle unexpected protocol events
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ *");
                 }
                 break;
 
@@ -581,6 +647,12 @@ s_client_execute (s_client_t *self, event_t event)
                 else
                 if (self->event == expired_event) {
                     if (!self->exception) {
+                        //  check if connection is dead
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ check if connection is dead");
+                        check_if_connection_is_dead (&self->client);
+                    }
+                    if (!self->exception) {
                         //  send CONNECTION_PING
                         if (mlm_client_verbose)
                             zsys_debug ("mlm_client:            $ send CONNECTION_PING");
@@ -590,6 +662,12 @@ s_client_execute (s_client_t *self, event_t event)
                 }
                 else
                 if (self->event == connection_pong_event) {
+                    if (!self->exception) {
+                        //  client is connected
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
+                    }
                 }
                 else
                 if (self->event == error_event) {
@@ -602,8 +680,17 @@ s_client_execute (s_client_t *self, event_t event)
                     if (!self->exception)
                         self->state = have_error_state;
                 }
+                else
+                if (self->event == exception_event) {
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ exception");
+                }
                 else {
                     //  Handle unexpected protocol events
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ *");
                 }
                 break;
 
@@ -635,9 +722,24 @@ s_client_execute (s_client_t *self, event_t event)
                 }
                 else
                 if (self->event == connection_pong_event) {
+                    if (!self->exception) {
+                        //  client is connected
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
+                    }
+                }
+                else
+                if (self->event == exception_event) {
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ exception");
                 }
                 else {
                     //  Handle unexpected protocol events
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ *");
                 }
                 break;
 
@@ -673,6 +775,12 @@ s_client_execute (s_client_t *self, event_t event)
                 }
                 else
                 if (self->event == connection_pong_event) {
+                    if (!self->exception) {
+                        //  client is connected
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
+                    }
                 }
                 else
                 if (self->event == error_event) {
@@ -685,13 +793,28 @@ s_client_execute (s_client_t *self, event_t event)
                     if (!self->exception)
                         self->state = have_error_state;
                 }
+                else
+                if (self->event == exception_event) {
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ exception");
+                }
                 else {
                     //  Handle unexpected protocol events
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ *");
                 }
                 break;
 
             case defaults_state:
                 if (self->event == connection_pong_event) {
+                    if (!self->exception) {
+                        //  client is connected
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
+                    }
                 }
                 else
                 if (self->event == error_event) {
@@ -704,8 +827,17 @@ s_client_execute (s_client_t *self, event_t event)
                     if (!self->exception)
                         self->state = have_error_state;
                 }
+                else
+                if (self->event == exception_event) {
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ exception");
+                }
                 else {
                     //  Handle unexpected protocol events
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ *");
                 }
                 break;
 
@@ -753,16 +885,22 @@ s_client_execute (s_client_t *self, event_t event)
             case reconnecting_state:
                 if (self->event == ok_event) {
                     if (!self->exception) {
-                        //  use heartbeat timer
+                        //  client is connected
                         if (mlm_client_verbose)
-                            zsys_debug ("mlm_client:            $ use heartbeat timer");
-                        use_heartbeat_timer (&self->client);
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
                     }
                     if (!self->exception)
                         self->state = connected_state;
                 }
                 else
                 if (self->event == connection_pong_event) {
+                    if (!self->exception) {
+                        //  client is connected
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ client is connected");
+                        client_is_connected (&self->client);
+                    }
                 }
                 else
                 if (self->event == error_event) {
@@ -775,8 +913,17 @@ s_client_execute (s_client_t *self, event_t event)
                     if (!self->exception)
                         self->state = have_error_state;
                 }
+                else
+                if (self->event == exception_event) {
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ exception");
+                }
                 else {
                     //  Handle unexpected protocol events
+                        //  No action - just logging
+                        if (mlm_client_verbose)
+                            zsys_debug ("mlm_client:            $ *");
                 }
                 break;
         }
@@ -799,7 +946,13 @@ s_client_handle_timeout (zloop_t *loop, int timer_id, void *argument)
 {
     s_client_t *self = (s_client_t *) argument;
     s_client_execute (self, expired_event);
-    return self->terminated? -1: 0;
+    if (self->terminated)
+        return -1;
+
+    if (self->timeout > 0)
+        self->expiry_timer = zloop_timer (
+            loop, self->timeout, 1, s_client_handle_timeout, self);
+    return 0;
 }
 
 //  zloop callback when client wakeup timer expires
@@ -828,11 +981,21 @@ s_client_handle_cmdpipe (zloop_t *loop, zsock_t *reader, void *argument)
     if (streq (method, "$TERM"))
         self->terminated = true;    //  Shutdown the engine
     else
-    if (streq (method, "CONSTRUCTOR")) {
+    if (streq (method, "$CONNECTED"))
+        zsock_send (self->cmdpipe, "i", self->connected);
+    else
+    if (streq (method, "SET PLAIN AUTH")) {
+        zstr_free (&self->args.username);
+        zstr_free (&self->args.password);
+        zsock_recv (self->cmdpipe, "ss", &self->args.username, &self->args.password);
+        s_client_execute (self, set_plain_auth_event);
+    }
+    else
+    if (streq (method, "CONNECT")) {
         zstr_free (&self->args.endpoint);
         zstr_free (&self->args.address);
         zsock_recv (self->cmdpipe, "s4s", &self->args.endpoint, &self->args.timeout, &self->args.address);
-        s_client_execute (self, constructor_event);
+        s_client_execute (self, connect_event);
     }
     else
     if (streq (method, "DESTRUCTOR")) {
@@ -988,7 +1151,7 @@ mlm_client (zsock_t *cmdpipe, void *msgpipe)
     s_client_t *self = s_client_new (cmdpipe, (zsock_t *) msgpipe);
     if (self) {
         zsock_signal (cmdpipe, 0);
-        
+
         //  Set up handler for the sockets the client uses
         engine_handle_socket ((client_t *) self, self->cmdpipe, s_client_handle_cmdpipe);
         engine_handle_socket ((client_t *) self, self->msgpipe, s_client_handle_msgpipe);
@@ -1011,6 +1174,7 @@ mlm_client (zsock_t *cmdpipe, void *msgpipe)
 struct _mlm_client_t {
     zactor_t *actor;            //  Client actor
     zsock_t *msgpipe;           //  Pipe for async message flow
+    bool connected;             //  Client currently connected or not
     char *command;              //  Last received protocol command
     int status;                 //  Returned by actor reply
     char *reason;               //  Returned by actor reply
@@ -1024,25 +1188,16 @@ struct _mlm_client_t {
 
 //  ---------------------------------------------------------------------------
 //  Create a new mlm_client
-//  Connect to server endpoint, with specified timeout in msecs (zero means wait    
-//  forever). Constructor succeeds if connection is successful. The caller may      
-//  specify its address.                                                            
-
-static int 
-mlm_client_constructor (mlm_client_t *self, const char *endpoint, uint32_t timeout, const char *address);
 
 MLM_EXPORT mlm_client_t *
-mlm_client_new (const char *endpoint, uint32_t timeout, const char *address)
+mlm_client_new (void)
 {
     mlm_client_t *self = (mlm_client_t *) zmalloc (sizeof (mlm_client_t));
     if (self) {
         zsock_t *backend;
         self->msgpipe = zsys_create_pipe (&backend);
-        self->actor = zactor_new (mlm_client, backend);
-        if (self->actor)
-            self->status = mlm_client_constructor (self, endpoint, timeout, address);
-        if (self->status == -1)
-            zactor_destroy (&self->actor);
+        if (self->msgpipe)
+            self->actor = zactor_new (mlm_client, backend);
         if (!self->actor)
             mlm_client_destroy (&self);
     }
@@ -1111,6 +1266,22 @@ mlm_client_msgpipe (mlm_client_t *self)
 
 
 //  ---------------------------------------------------------------------------
+//  Return true if client is currently connected, else false. Note that the
+//  client will automatically re-connect if the server dies and restarts after
+//  a successful first connection.
+
+bool
+mlm_client_connected (mlm_client_t *self)
+{
+    assert (self);
+    int connected;
+    zsock_send (self->actor, "s", "$CONNECTED");
+    zsock_recv (self->actor, "i", &connected);
+    return connected!=0;
+}
+
+
+//  ---------------------------------------------------------------------------
 //  Get valid reply from actor; discard replies that does not match. Current
 //  implementation filters on first frame of message. Blocks until a valid
 //  reply is received, and properties can be loaded from it. Returns 0 if
@@ -1124,7 +1295,7 @@ s_accept_reply (mlm_client_t *self, ...)
         char *reply = zstr_recv (self->actor);
         if (!reply)
             break;              //  Interrupted or timed-out
-        
+
         va_list args;
         va_start (args, self);
         char *filter = va_arg (args, char *);
@@ -1155,16 +1326,34 @@ s_accept_reply (mlm_client_t *self, ...)
 
 
 //  ---------------------------------------------------------------------------
+//  Set PLAIN authentication username and password. If you do not call this, the    
+//  client will use NULL authentication. TODO: add "set curve auth".                
+//  Returns >= 0 if successful, -1 if interrupted.
+
+int 
+mlm_client_set_plain_auth (mlm_client_t *self, const char *username, const char *password)
+{
+    assert (self);
+
+    zsock_send (self->actor, "sss", "SET PLAIN AUTH", username, password);
+    if (s_accept_reply (self, "SUCCESS", "FAILURE", NULL))
+        return -1;              //  Interrupted or timed-out
+    return self->status;
+}
+
+
+//  ---------------------------------------------------------------------------
 //  Connect to server endpoint, with specified timeout in msecs (zero means wait    
 //  forever). Constructor succeeds if connection is successful. The caller may      
 //  specify its address.                                                            
 //  Returns >= 0 if successful, -1 if interrupted.
 
-static int 
-mlm_client_constructor (mlm_client_t *self, const char *endpoint, uint32_t timeout, const char *address)
+int 
+mlm_client_connect (mlm_client_t *self, const char *endpoint, uint32_t timeout, const char *address)
 {
     assert (self);
-    zsock_send (self->actor, "ss4s", "CONSTRUCTOR", endpoint, timeout, address);
+
+    zsock_send (self->actor, "ss4s", "CONNECT", endpoint, timeout, address);
     if (s_accept_reply (self, "SUCCESS", "FAILURE", NULL))
         return -1;              //  Interrupted or timed-out
     return self->status;
@@ -1180,6 +1369,7 @@ int
 mlm_client_destructor (mlm_client_t *self)
 {
     assert (self);
+
     zsock_send (self->actor, "s", "DESTRUCTOR");
     if (s_accept_reply (self, "SUCCESS", "FAILURE", NULL))
         return -1;              //  Interrupted or timed-out
@@ -1196,6 +1386,7 @@ int
 mlm_client_set_producer (mlm_client_t *self, const char *stream)
 {
     assert (self);
+
     zsock_send (self->actor, "ss", "SET PRODUCER", stream);
     if (s_accept_reply (self, "SUCCESS", "FAILURE", NULL))
         return -1;              //  Interrupted or timed-out
@@ -1204,7 +1395,7 @@ mlm_client_set_producer (mlm_client_t *self, const char *stream)
 
 
 //  ---------------------------------------------------------------------------
-//  Consume messages with matching addresses. The pattern is a regular expression   
+//  Consume messages with matching subjects. The pattern is a regular expression    
 //  using the CZMQ zrex syntax. The most useful elements are: ^ and $ to match the  
 //  start and end, . to match any character, \s and \S to match whitespace and      
 //  non-whitespace, \d and \D to match a digit and non-digit, \a and \A to match    
@@ -1217,6 +1408,7 @@ int
 mlm_client_set_consumer (mlm_client_t *self, const char *stream, const char *pattern)
 {
     assert (self);
+
     zsock_send (self->actor, "sss", "SET CONSUMER", stream, pattern);
     if (s_accept_reply (self, "SUCCESS", "FAILURE", NULL))
         return -1;              //  Interrupted or timed-out
@@ -1233,6 +1425,7 @@ int
 mlm_client_set_worker (mlm_client_t *self, const char *address, const char *pattern)
 {
     assert (self);
+
     zsock_send (self->actor, "sss", "SET WORKER", address, pattern);
     if (s_accept_reply (self, "SUCCESS", "FAILURE", NULL))
         return -1;              //  Interrupted or timed-out

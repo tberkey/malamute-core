@@ -11,7 +11,11 @@
     <include filename = "../license.xml" />
 
     <state name = "start">
-        <event name = "constructor" next = "connecting">
+        <event name = "set plain auth">
+            <action name = "use plain security mechanism" />
+            <action name = "signal success" />
+        </event>
+        <event name = "connect" next = "connecting">
             <action name = "connect to server endpoint" />
             <action name = "set client address" />
             <action name = "use connect timeout" />
@@ -21,16 +25,18 @@
             <action name = "signal bad endpoint" />
             <action name = "terminate" />
         </event>
+        <event name = "destructor">
+            <action name = "signal success" />
+        </event>
     </state>
 
     <state name = "connecting" inherit = "defaults">
         <event name = "OK" next = "connected">
             <action name = "signal success" />
-            <action name = "use heartbeat timer" />
+            <action name = "client is connected" />
         </event>
-        <event name = "expired">
+        <event name = "expired" next = "start">
             <action name = "signal server not present" />
-            <action name = "terminate" />
         </event>
     </state>
     
@@ -60,6 +66,7 @@
             <action name = "pass service message to app" />
         </event>
         <event name = "expired">
+            <action name = "check if connection is dead" />
             <action name = "send" message = "CONNECTION PING" />
         </event>
     </state>
@@ -87,9 +94,13 @@
 
     <state name = "defaults">
         <event name = "CONNECTION PONG">
+            <action name = "client is connected" />
         </event>
         <event name = "ERROR" next = "have error">
             <action name = "check status code" />
+        </event>
+        <event name = "exception">
+            <!-- Generic exception event to interrupt actions -->
         </event>
         <event name = "*">
             <!-- Discard any other incoming events -->
@@ -109,12 +120,21 @@
    
     <state name = "reconnecting" inherit = "defaults">
         <event name = "OK" next = "connected">
-            <action name = "use heartbeat timer" />
+            <action name = "client is connected" />
         </event>
     </state>
 
     <!-- API methods -->
-    <method name = "constructor" return = "status">
+    <method name = "set plain auth" return = "status">
+    Set PLAIN authentication username and password. If you do not call this,
+    the client will use NULL authentication. TODO: add "set curve auth".
+        <field name = "username" type = "string" />
+        <field name = "password" type = "string" />
+        <accept reply = "SUCCESS" />
+        <accept reply = "FAILURE" />
+    </method>
+
+    <method name = "connect" return = "status">
     Connect to server endpoint, with specified timeout in msecs (zero means
     wait forever). Constructor succeeds if connection is successful. The caller
     may specify its address.
@@ -150,7 +170,7 @@
     </method>
 
     <method name = "set consumer" return = "status">
-    Consume messages with matching addresses. The pattern is a regular
+    Consume messages with matching subjects. The pattern is a regular
     expression using the CZMQ zrex syntax. The most useful elements are:
     ^ and $ to match the start and end, . to match any character, \s and
     \S to match whitespace and non-whitespace, \d and \D to match a digit
