@@ -7,12 +7,12 @@
 # Project setup
 ########################################################################
 cmake_minimum_required(VERSION 2.8)
-project(mlm)
+project(malamute)
 enable_language(C)
 enable_testing()
 
-set(SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-set(BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
+set(SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 
 ########################################################################
 # determine version
@@ -21,7 +21,7 @@ foreach(which MAJOR MINOR PATCH)
     file(STRINGS "${SOURCE_DIR}/include/mlm_library.h" MALAMUTE_VERSION_STRING REGEX "#define MALAMUTE_VERSION_${which}")
     string(REGEX MATCH "#define MALAMUTE_VERSION_${which} ([0-9_]+)" MALAMUTE_REGEX_MATCH "${MALAMUTE_VERSION_STRING}")
     if (NOT MALAMUTE_REGEX_MATCH)
-        message(FATAL_ERROR "failed to parse MALAMUTE_VERSION_${which} from malamute.h")
+        message(FATAL_ERROR "failed to parse MALAMUTE_VERSION_${which} from mlm_library.h")
     endif()
     set(MALAMUTE_${which}_VERSION ${CMAKE_MATCH_1})
 endforeach(which)
@@ -45,7 +45,7 @@ if (NOT HAVE_NET_IF_H)
     CHECK_INCLUDE_FILE("net/if.h" HAVE_NET_IF_H)
 endif()
 
-file(WRITE ${BINARY_DIR}/platform.h.in "
+file(WRITE "${BINARY_DIR}/platform.h.in" "
 #cmakedefine HAVE_LINUX_WIRELESS_H
 #cmakedefine HAVE_NET_IF_H
 #cmakedefine HAVE_NET_IF_MEDIA_H
@@ -53,13 +53,13 @@ file(WRITE ${BINARY_DIR}/platform.h.in "
 #cmakedefine HAVE_FREEIFADDRS
 ")
 
-configure_file(${BINARY_DIR}/platform.h.in ${BINARY_DIR}/platform.h)
+configure_file("${BINARY_DIR}/platform.h.in" "${BINARY_DIR}/platform.h")
 
 #The MSVC C compiler is too out of date,
 #so the sources have to be compiled as c++
 if (MSVC)
     enable_language(CXX)
-    file(GLOB sources ${SOURCE_DIR}/src/*.c)
+    file(GLOB sources "${SOURCE_DIR}/src/*.c")
     set_source_files_properties(${sources} PROPERTIES LANGUAGE CXX)
     set(MORE_LIBRARIES ws2_32 Rpcrt4 Iphlpapi)
 endif()
@@ -116,13 +116,13 @@ set_property(TARGET CZMQ_LIBRARIES_SHARED PROPERTY IMPORTED_IMPLIB_RELWITHDEBINF
 set (mlm_headers
     include/mlm_library.h
     include/malamute.h
-    src/zbits.h
     include/mlm_proto.h
     include/mlm_server.h
     include/mlm_client.h
     src/mlm_msg.h
     src/mlm_stream_simple.h
     src/mlm_mailbox_simple.h
+    src/zbits.h
     src/mlm_server_engine.inc
     src/mlm_client_engine.inc
     src/mlm_client_custom.xml
@@ -138,13 +138,13 @@ include_directories(${SOURCE_DIR}/include)
 include_directories(${ZEROMQ_INCLUDE_DIR})
 include_directories(${CZMQ_INCLUDE_DIR})
 set (mlm_sources
-    src/zbits.c
     src/mlm_proto.c
     src/mlm_server.c
     src/mlm_client.c
     src/mlm_msg.c
     src/mlm_stream_simple.c
     src/mlm_mailbox_simple.c
+    src/zbits.c
 )
 source_group ("Source Files" FILES ${mlm_sources})
 
