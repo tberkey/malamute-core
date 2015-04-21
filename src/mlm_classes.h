@@ -14,16 +14,16 @@
     =========================================================================
 */
 
-#ifndef __MLM_CLASSES_H_INCLUDED__
-#define __MLM_CLASSES_H_INCLUDED__
+#ifndef MLM_CLASSES_H_INCLUDED
+#define MLM_CLASSES_H_INCLUDED
 
 //  External API
 #include "../include/malamute.h"
 
 //  Internal API
-#include "zbits.h"
 #include "mlm_msg.h"
 #include "mlm_stream_simple.h"
 #include "mlm_mailbox_simple.h"
+#include "zbits.h"
 
 #endif

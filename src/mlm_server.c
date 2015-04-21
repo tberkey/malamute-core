@@ -1,12 +1,12 @@
 /*  =========================================================================
     mlm_server - Malamute Server
 
-    Copyright (c) the Contributors as noted in the AUTHORS file.       
+    Copyright (c) the Contributors as noted in the AUTHORS file.
     This file is part of the Malamute Project.
-                                                                       
+
     This Source Code Form is subject to the terms of the Mozilla Public
     License, v. 2.0. If a copy of the MPL was not distributed with this
-    file, You can obtain one at http://mozilla.org/MPL/2.0/.           
+    file, You can obtain one at http://mozilla.org/MPL/2.0/.
     =========================================================================
 */
 
@@ -38,6 +38,7 @@ typedef struct _client_t client_t;
 //  This is a simple stream class
 
 typedef struct {
+    char *name;                 //  Stream name
     zactor_t *actor;            //  Stream engine, zactor
     zsock_t *msgpipe;           //  Socket to send messages to for stream
 } stream_t;
@@ -126,18 +127,21 @@ s_stream_destroy (stream_t **self_p)
         stream_t *self = *self_p;
         zactor_destroy (&self->actor);
         zsock_destroy (&self->msgpipe);
+        free (self->name);
         free (self);
         *self_p = NULL;
     }
 }
 
 static stream_t *
-s_stream_new (client_t *client)
+s_stream_new (client_t *client, const char *name)
 {
     stream_t *self = (stream_t *) zmalloc (sizeof (stream_t));
     if (self) {
         zsock_t *backend;
-        self->msgpipe = zsys_create_pipe (&backend);
+        self->name = strdup (name);
+        if (self->name)
+            self->msgpipe = zsys_create_pipe (&backend);
         if (self->msgpipe) {
             engine_handle_socket (client->server, self->msgpipe, s_forward_stream_traffic);
             self->actor = zactor_new (mlm_stream_simple, backend);
@@ -153,7 +157,7 @@ s_stream_require (client_t *self, const char *name)
 {
     stream_t *stream = (stream_t *) zhashx_lookup (self->server->streams, name);
     if (!stream)
-        stream = s_stream_new (self);
+        stream = s_stream_new (self, name);
     if (stream)
         zhashx_insert (self->server->streams, name, stream);
     return (stream);
@@ -397,7 +401,7 @@ write_message_to_stream (client_t *self)
     if (self->writer) {
         mlm_msg_t *msg = mlm_msg_new (
             self->address,
-            NULL,
+            self->writer->name,
             mlm_proto_subject (self->message),
             NULL,
             mlm_proto_timeout (self->message),
@@ -426,11 +430,11 @@ write_message_to_mailbox (client_t *self)
         mlm_proto_tracker (self->message),
         mlm_proto_timeout (self->message),
         mlm_proto_get_content (self->message));
-        
+
     //  Try to dispatch to client immediately, if it's connected
     client_t *target = (client_t *) zhashx_lookup (
         self->server->clients, mlm_proto_address (self->message));
-    
+
     if (target) {
         assert (!target->msg);
         target->msg = msg;
@@ -457,7 +461,7 @@ write_message_to_service (client_t *self)
         mlm_proto_tracker (self->message),
         mlm_proto_timeout (self->message),
         mlm_proto_get_content (self->message));
-        
+
     service_t *service = s_service_require (self, mlm_proto_address (self->message));
     assert (service);
     zlistx_add_end (service->queue, msg);
@@ -612,16 +616,16 @@ mlm_server_test (bool verbose)
     printf (" * mlm_server: ");
     if (verbose)
         printf ("\n");
-    
+
     //  @selftest
     zactor_t *server = zactor_new (mlm_server, "mlm_server_test");
     if (verbose)
         zstr_send (server, "VERBOSE");
-    zstr_sendx (server, "BIND", "ipc://@/malamute", NULL);
+    zstr_sendx (server, "BIND", "tcp://127.0.0.1:9999", NULL);
 
     zsock_t *reader = zsock_new (ZMQ_DEALER);
     assert (reader);
-    zsock_connect (reader, "ipc://@/malamute");
+    zsock_connect (reader, "tcp://127.0.0.1:9999");
     zsock_set_rcvtimeo (reader, 500);
 
     mlm_proto_t *proto = mlm_proto_new ();
@@ -636,7 +640,7 @@ mlm_server_test (bool verbose)
     //  Now do a stream publish-subscribe test
     zsock_t *writer = zsock_new (ZMQ_DEALER);
     assert (writer);
-    zsock_connect (writer, "ipc://@/malamute");
+    zsock_connect (writer, "tcp://127.0.0.1:9999");
     zsock_set_rcvtimeo (reader, 500);
 
     //  Open connections from both reader and writer
@@ -692,12 +696,12 @@ mlm_server_test (bool verbose)
     assert (streq (mlm_proto_subject (proto), "temp.london"));
 
     mlm_proto_destroy (&proto);
-        
+
     //  Finished, we can clean up
     zsock_destroy (&writer);
     zsock_destroy (&reader);
     zactor_destroy (&server);
-    
+
     //  @end
     printf ("OK\n");
 }
